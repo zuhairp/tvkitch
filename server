@@ -1,0 +1,84 @@
+#!/usr/bin/env python
+
+from typing import Tuple, io, Any
+import gevent
+from gevent.server import StreamServer
+from gevent.queue import Queue, Full as QueueFullException, Empty as QueueEmptyException
+from rarfile import RarFile
+
+import os
+import socket
+
+import record
+from record import RecordType
+import utils
+
+def get_media_files():
+    path = "/media/zuhair/Shuttle"
+    for root, _, files in os.walk(path):
+        for filename in files:
+            if filename.endswith('.rar') or filename.endswith('.mkv'):
+                yield os.path.join(root, filename)
+
+def handle_list_request(out_stream: io.IO[bytes]):
+    filenames = list(get_media_files())
+    response = record.create_response(RecordType.LISTING, filenames)
+    record.write_record(out_stream, response)
+
+def handle_extract_request(data: Any, out_stream: io.IO[bytes]):
+    path = data['path']
+    rf = RarFile(path)
+    info = rf.infolist()[0]
+    src = rf.open(info.filename, 'r')
+    dst = open(os.path.join('/media/zuhair/Shuttle/extracted', os.path.basename(info.filename)), 'wb')
+
+    progress_queue = Queue(maxsize=1)
+    def on_progress(copied):
+        try:
+            progress_queue.put_nowait(copied)
+        except QueueFullException:
+            # Ignore and move on
+            pass
+    
+    def send_status():
+        while True:
+            try:
+                progress = progress_queue.peek(block=True, timeout=1)
+                data = {
+                    'status' : 'copying',
+                    'progress': progress,
+                    'total': info.file_size
+                }
+                response = record.create_response(RecordType.EXTRACT, data=data)
+                record.write_record(out_stream, response)
+                gevent.sleep(0.032) # 30 Hz
+                progress_queue.get_nowait()
+            except QueueEmptyException:
+                break
+
+        data = {
+            'status' : 'complete',
+        }
+        response = record.create_response(RecordType.EXTRACT, data=data)
+        record.write_record(out_stream, response)
+    
+    sender = gevent.spawn(send_status)
+    utils.copy_stream(src, dst, on_progress)
+    sender.join()
+    
+def handle_conn(conn: socket.socket, address: Tuple[str, int]):
+    with conn.makefile(mode='rwb') as socket_file:
+        request = record.read_record(socket_file)
+        assert(record.Direction(request.direction) == record.Direction.REQUEST)
+
+        if (request.record_type == RecordType.LISTING):
+            handle_list_request(socket_file)
+        
+        if (request.record_type == RecordType.EXTRACT):
+            handle_extract_request(request.data, socket_file)
+    
+    conn.close()
+
+if __name__ == '__main__':
+    server = StreamServer(('0.0.0.0', 3696), handle_conn)
+    server.serve_forever()

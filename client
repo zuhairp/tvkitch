@@ -1,0 +1,69 @@
+#!/usr/bin/env python
+
+import os
+import sys
+import socket
+
+import record
+from record import RecordType, Direction
+
+from prompt_toolkit import prompt, print_formatted_text as print, HTML
+
+SERVER_ADDRESS = ('localhost', 3696)
+
+def get_listing():
+    sock = socket.create_connection(SERVER_ADDRESS)
+    try:
+        with sock.makefile(mode='rwb') as sock_file:
+            r = record.create_request(RecordType.LISTING, data={})
+            record.write_record(sock_file, r)
+
+            response = record.read_record(sock_file)
+
+            assert(response.record_type == RecordType.LISTING)
+            assert(response.direction == Direction.RESPONSE)
+
+            return response.data
+    finally:
+        sock.close()
+
+def remote_extract(filename):
+    sock = socket.create_connection(SERVER_ADDRESS)
+    try:
+        with sock.makefile(mode='rwb') as sock_file:
+            r = record.create_request(RecordType.EXTRACT, data={'path': filename})
+            record.write_record(sock_file, r)
+
+            while True:
+                response = record.read_record(sock_file)
+                assert(response.record_type == RecordType.EXTRACT)
+                assert(response.direction == Direction.RESPONSE)
+
+                if (response.data['status'] == 'complete'):
+                    return
+                else:
+                    sys.stdout.write(f"{response.data['progress']>>20:>6}MB\r")
+                    sys.stdout.flush()
+
+    finally:
+        sock.close()
+
+if __name__ == '__main__':
+    filenames = get_listing()
+    for fullpath in filenames:
+        filename = fullpath #os.path.basename(fullpath)
+        color = 'ansired' if filename.endswith('.rar') else 'ansigreen'
+        print(HTML(f'<{color}>{filename}</{color}>'))
+
+        if (filename.endswith('.rar')):
+            remote_extract(filename)
+
+    print()
+    filenames = get_listing()
+    for fullpath in filenames:
+        filename = fullpath #os.path.basename(fullpath)
+        color = 'ansired' if filename.endswith('.rar') else 'ansigreen'
+        print(HTML(f'<{color}>{filename}</{color}>'))
+
+    
+
